@@ -1,6 +1,9 @@
 // Controlador PID para o forninho
 // Autor: Emiliano Sauvisky <esauvisky@gmail.com>
 
+// TODO: Adicionar controles para mudar setPoint em tempo real
+// TODO: Testar ativar P_ON_M quando o gap entre input e setPoint for pequeno
+
 /**************************
         Bibliotecas
 **************************/
@@ -31,7 +34,7 @@
 uint8_t degree[8] = {140, 146, 146, 140, 128, 128, 128, 128};
 
 // Definições PID
-double temperature, lastTemperature, setPoint, output;
+double temperature, setPoint, output;
 unsigned long lastTempUpdate, windowStartTime;
 #define WINDOW_SIZE        5000
 #define MINIMUM_RELAY_TIME 500
@@ -55,52 +58,50 @@ LiquidCrystal lcd(LCD_RS, LCD_EN, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
 PID myPID(&temperature, &output, &setPoint, KP, KI, KD, DIRECT);
 
 
-// Atualiza a temperatura no menor tempo possível de acordo com o chip
+/* updateTemperature()
+    Atualiza a temperatura no menor tempo possível de acordo com o IC
+    Retorna true  se a temperatura foi atualizada
+    Retorna false se ainda não passou o tempo para realizar nova leitura */
 bool updateTemperature() {
-  if ((millis() - lastTempUpdate) > TEMP_READ_DELAY) {
-    // Obtém a média do termopar em celsius
-    //temperature = (lastTemperature + thermocouple.readCelsius()) / 2;
-    //lastTemperature = temperature;
-    temperature = thermocouple.readCelsius();
-    lastTempUpdate = millis();
-    return true;
-  }
-  return false;
+    if ((millis() - lastTempUpdate) > TEMP_READ_DELAY) {
+        temperature = thermocouple.readCelsius();
+        lastTempUpdate = millis();
+        return true;
+    }
+    return false;
 }
 
 /***************************
-     Pre-Configurações
+      Pre-Configurações
 ***************************/
 void setup() {
-  Serial.begin(9600);
+    //Serial.begin(9600);
 
-  // Define setPoint hardcoded
-  setPoint = 100;
+    // Define a temperatura desejada
+    setPoint = 100;
 
-  // Define o pino do relay como um output
-  pinMode(RELAY_PIN, OUTPUT);
+    // Define o pino do relay como um output
+    pinMode(RELAY_PIN, OUTPUT);
 
-  // Ativa os pinos GND e VCC para o módulo MAX6675
-  pinMode(THERMO_VCC, OUTPUT); digitalWrite(THERMO_VCC, HIGH);
-  pinMode(THERMO_GND, OUTPUT); digitalWrite(THERMO_GND, LOW);
+    // Ativa os pinos GND e VCC para o módulo MAX6675
+    pinMode(THERMO_VCC, OUTPUT); digitalWrite(THERMO_VCC, HIGH);
+    pinMode(THERMO_GND, OUTPUT); digitalWrite(THERMO_GND, LOW);
 
-  // Inicia o módulo do LCD (2 linhas, 16 colunas por linha)
-  lcd.begin(16, 2);
-  // Adiciona o símbolo de graus ao LCD
-  lcd.createChar(0, degree);
-  lcd.clear();
+    // Inicia o módulo do LCD (2 linhas, 16 colunas por linha)
+    lcd.begin(16, 2);
+    // Cria o símbolo de graus ao LCD
+    lcd.createChar(0, degree);
+    lcd.clear();
 
-  // Inicializa o PID
-  // Seta o output do myPID entre 0 e WINDOW_SIZE.
-  myPID.SetOutputLimits(0, WINDOW_SIZE);
-  myPID.SetSampleTime(125);
-  myPID.SetMode(AUTOMATIC);
+    // Seta o output do myPID entre 0 e WINDOW_SIZE.
+    myPID.SetOutputLimits(0, WINDOW_SIZE);
+    // Seta o sampling time para 125ms
+    myPID.SetSampleTime(125);
+    // Inicializa o PID
+    myPID.SetMode(AUTOMATIC);
 
-  // Aguarda a inicialização do MAX6675
-  delay(250);
-
-  // Obtém a primeira medida de temperatura
-  //lastTemperature = thermocouple.readCelsius();
+    // Aguarda a inicialização do MAX6675
+    while (!updateTemperature) {};
 }
 
 
@@ -108,40 +109,42 @@ void setup() {
        Loop Principal
 ***************************/
 void loop() {
-  // Atualiza a temperatura
-  updateTemperature();
-  // Roda o cálculo do PID
-  myPID.Compute();
-  
-  // Imprime a primeira linha do LCD (a temperatura atual)
-  lcd.setCursor(0, 0);
-  lcd.print("CurTemp:"); lcd.print(temperature); 
-  lcd.setCursor(14, 0); 
-  lcd.write((byte)0); lcd.print("C");
+    // Faz controle de tempo proporcional para determinar se o relê deve ser ligado ou não
+    unsigned long now = millis();
+    if (now - windowStartTime > WINDOW_SIZE) {
+        // Limpa o LCD a cada ciclo
+        lcd.clear();
+        windowStartTime += WINDOW_SIZE;
+    }
 
-  // Imprime a segunda linha (o output)
-  lcd.setCursor(0, 1);
-  lcd.print("Output: "); lcd.print(int(output));
-  
-  // Liga o relê baseado no output do pid
-  unsigned long now = millis();
-  if (now - windowStartTime > WINDOW_SIZE) {
-    lcd.clear();
-    windowStartTime += WINDOW_SIZE;
-  }
-  if (output > now - windowStartTime) {
-    // Do not waste relay clicks if the time is too little
-    //if (output > MINIMUM_RELAY_TIME) {
-      lcd.setCursor(13, 1); lcd.print(" ON");
-      digitalWrite(RELAY_PIN, HIGH);
-    //}
-  } else {
-    // Do not waste relay clicks if the time is too little
-    //if (WINDOW_SIZE - output < MINIMUM_RELAY_TIME) {
-      lcd.setCursor(13, 1); lcd.print("OFF");
-      digitalWrite(RELAY_PIN, LOW);
-    //}
-  }
-  
-  delay(50);
+    // Atualiza a temperatura
+    updateTemperature();
+    // Roda o cálculo do PID
+    myPID.Compute();
+
+    // Imprime a primeira linha do LCD (a temperatura atual)
+    lcd.setCursor(0, 0);
+    lcd.print("CurTemp:"); lcd.print(temperature);
+    lcd.setCursor(14, 0);
+    lcd.write((byte)0); lcd.print("C");
+
+    // Imprime a segunda linha (o output)
+    lcd.setCursor(0, 1);
+    lcd.print("Output: "); lcd.print(int(output));
+
+    // Liga o relê baseado no output do pid
+    if (output > now - windowStartTime) {
+        // TODO: Não gastar clicks do relê se a janela for muito pequena
+        //if (output > MINIMUM_RELAY_TIME) {
+        lcd.setCursor(13, 1); lcd.print(" ON");
+        digitalWrite(RELAY_PIN, HIGH);
+        //}
+    } else {
+        //if (WINDOW_SIZE - output < MINIMUM_RELAY_TIME) {
+        lcd.setCursor(13, 1); lcd.print("OFF");
+        digitalWrite(RELAY_PIN, LOW);
+        //}
+    }
+
+    delay(50);
 }
